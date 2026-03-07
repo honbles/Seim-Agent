@@ -6,6 +6,7 @@ package collector
 // (GetExtendedTcpTable / GetExtendedUdpTable), then diffs against the
 // previous snapshot to emit connect/disconnect events.
 
+
 import (
 	"context"
 	"encoding/json"
@@ -21,9 +22,9 @@ import (
 )
 
 var (
-	modIphlpapi             = windows.NewLazySystemDLL("iphlpapi.dll")
-	procGetExtendedTcpTable = modIphlpapi.NewProc("GetExtendedTcpTable")
-	procGetExtendedUdpTable = modIphlpapi.NewProc("GetExtendedUdpTable")
+	modIphlpapi              = windows.NewLazySystemDLL("iphlpapi.dll")
+	procGetExtendedTcpTable  = modIphlpapi.NewProc("GetExtendedTcpTable")
+	procGetExtendedUdpTable  = modIphlpapi.NewProc("GetExtendedUdpTable")
 )
 
 // TCP table constants
@@ -51,12 +52,12 @@ type mibTCPTableOwnerPID struct {
 
 // connKey uniquely identifies a connection for diffing.
 type connKey struct {
-	pid     uint32
-	srcIP   string
-	srcPort int
-	dstIP   string
-	dstPort int
-	proto   string
+	pid      uint32
+	srcIP    string
+	srcPort  int
+	dstIP    string
+	dstPort  int
+	proto    string
 }
 
 // rawNetEvent is the JSON payload stored in Event.Raw.
@@ -186,7 +187,7 @@ func getTCPTable() ([]mibTCPRowOwnerPID, error) {
 		ret, _, _ := procGetExtendedTcpTable.Call(
 			uintptr(unsafe.Pointer(&buf[0])),
 			uintptr(unsafe.Pointer(&size)),
-			1, // bOrder (sorted)
+			1,                   // bOrder (sorted)
 			afInet,
 			tcpTableOwnerPIDAll,
 			0,
@@ -228,5 +229,5 @@ func uint32ToIP(addr uint32) net.IP {
 
 // ntohs converts network byte order uint16 to host byte order.
 func ntohs(n uint16) uint16 {
-	return (n >> 8) | (n << 8)
+	return (n>>8)|(n<<8)
 }

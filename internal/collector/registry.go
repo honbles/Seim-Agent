@@ -5,6 +5,7 @@ package collector
 // registry.go — watches configured Windows registry keys for changes
 // using RegNotifyChangeKeyValue and emits schema.Events on mutation.
 
+
 import (
 	"context"
 	"encoding/json"
@@ -23,10 +24,10 @@ import (
 
 // notifyFilter controls what changes trigger a notification.
 const (
-	regNotifyChangeName       = 0x00000001 // key created/deleted
+	regNotifyChangeName      = 0x00000001 // key created/deleted
 	regNotifyChangeAttributes = 0x00000002 // key attributes
-	regNotifyChangeLastSet    = 0x00000004 // value modification
-	regNotifyChangeSecurity   = 0x00000008 // security descriptor
+	regNotifyChangeLastSet   = 0x00000004 // value modification
+	regNotifyChangeSecurity  = 0x00000008 // security descriptor
 
 	// We watch for name + value changes.
 	regNotifyFilter = regNotifyChangeName | regNotifyChangeLastSet
@@ -184,10 +185,10 @@ func newRegistryWatcher(keyPath string) (*registryWatcher, error) {
 func (w *registryWatcher) arm() error {
 	ret, _, err := regNotifyChangeKeyValueProc.Call(
 		uintptr(w.handle),
-		1, // bWatchSubtree
+		1,                      // bWatchSubtree
 		regNotifyFilter,
 		uintptr(w.event),
-		1, // fAsynchronous
+		1,                      // fAsynchronous
 	)
 	if ret != 0 {
 		return fmt.Errorf("RegNotifyChangeKeyValue: %w", err)
@@ -201,8 +202,8 @@ func (w *registryWatcher) close() {
 }
 
 var (
-	modAdvapi32                 = windows.NewLazySystemDLL("advapi32.dll")
-	regNotifyChangeKeyValueProc = modAdvapi32.NewProc("RegNotifyChangeKeyValue")
+	modAdvapi32                   = windows.NewLazySystemDLL("advapi32.dll")
+	regNotifyChangeKeyValueProc   = modAdvapi32.NewProc("RegNotifyChangeKeyValue")
 )
 
 // splitHive parses "HKLM\SOFTWARE\..." into (registry.LOCAL_MACHINE, "SOFTWARE\...").

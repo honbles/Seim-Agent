@@ -23,10 +23,10 @@ import (
 
 // HostInfo captures static host metadata resolved once at startup.
 type HostInfo struct {
-	Hostname string
-	OS       string
-	AgentID  string
-	AgentVer string
+	Hostname  string
+	OS        string
+	AgentID   string
+	AgentVer  string
 }
 
 // ResolveHostInfo collects static host metadata.
@@ -55,8 +55,8 @@ func NewEnricher(host HostInfo, logger *slog.Logger) *Enricher {
 func (e *Enricher) Enrich(ev *schema.Event) {
 	// Always override agent identity — collectors should not forge these.
 	ev.AgentID = e.host.AgentID
-	ev.Host = e.host.Hostname
-	ev.OS = e.host.OS
+	ev.Host    = e.host.Hostname
+	ev.OS      = e.host.OS
 
 	// Assign a deterministic ID based on (time, agent, source, record_id)
 	// so duplicate deliveries can be deduplicated on the backend.

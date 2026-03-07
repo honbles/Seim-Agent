@@ -101,7 +101,7 @@ The disk queue decouples collection from delivery — if the backend goes offlin
 
 ```powershell
 git clone https://github.com/honbles/Seim-Agent.git
-cd Siem-Agent/agent
+cd Siem-Agent
 go mod tidy
 go build -o agent.exe ./cmd/agent
 ```
@@ -110,7 +110,7 @@ go build -o agent.exe ./cmd/agent
 
 ```bash
 git clone https://github.com/honbles/Siem-Agent.git
-cd Siem-Agent/agent
+cd Siem-Agent
 go mod tidy
 GOOS=windows GOARCH=amd64 go build -o agent.exe ./cmd/agent
 ```

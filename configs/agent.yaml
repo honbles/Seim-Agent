@@ -35,6 +35,64 @@ collector:
       - HKLM\SYSTEM\CurrentControlSet\Services
       - HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
 
+# ── Application Log Tailing ───────────────────────────────────────────────────
+# Each entry tails a log file and ships every new line as an event.
+# The collector resumes from where it left off after an agent restart.
+#
+# format options:
+#   json     — each line is a JSON object; time/level/user/ip extracted automatically
+#   text     — each line stored verbatim (no parsing)
+#   combined — Apache / nginx combined access log format
+#
+# severity: default 1–5 for lines from this file
+#   JSON logs with a level/severity field override this per line.
+#
+# Remove the leading '#' from any block below to enable it, or add your own.
+
+app_logs: []
+
+# ── Examples (uncomment and edit paths to use) ────────────────────────────────
+
+# JSON application log — any app that writes structured JSON logs
+# app_logs:
+#   - name: "my-api"
+#     path: "C:\\logs\\my-api\\app.log"
+#     format: "json"
+#     event_type: "applog"
+#     severity: 2
+#
+# nginx access log (combined format)
+#   - name: "nginx-access"
+#     path: "C:\\nginx\\logs\\access.log"
+#     format: "combined"
+#     event_type: "weblog"
+#     severity: 1
+#
+# Plain text log
+#   - name: "my-service"
+#     path: "C:\\logs\\my-service\\service.log"
+#     format: "text"
+#     event_type: "applog"
+#     severity: 1
+#
+# Multiple files in one block — just keep adding list entries:
+# app_logs:
+#   - name: "api"
+#     path: "C:\\logs\\api.log"
+#     format: "json"
+#     event_type: "applog"
+#     severity: 2
+#   - name: "worker"
+#     path: "C:\\logs\\worker.log"
+#     format: "json"
+#     event_type: "applog"
+#     severity: 2
+#   - name: "nginx"
+#     path: "C:\\nginx\\logs\\access.log"
+#     format: "combined"
+#     event_type: "weblog"
+#     severity: 1
+
 forwarder:
   # Backend ingest API endpoint.
   backend_url: "https://siem.example.internal:8443"
@@ -55,7 +113,7 @@ forwarder:
 
 queue:
   # Path to the local SQLite buffer database.
-  db_path: "C:\\ProgramData\\OpenSIEM\\queue.db"
+  db_path: "C:\\ProgramData\\OpenSIEM\\queue"
   # Maximum number of events to buffer before evicting oldest.
   max_rows: 100000
 

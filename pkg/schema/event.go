@@ -16,6 +16,9 @@ const (
 	EventTypeFile     EventType = "file"
 	EventTypeSysmon   EventType = "sysmon"
 	EventTypeRaw      EventType = "raw"
+	EventTypeDNS      EventType = "dns"
+	EventTypeHealth   EventType = "health"
+	EventTypeAppLog   EventType = "applog"
 )
 
 // Severity maps to a 1–5 scale (1=info, 5=critical)
@@ -30,7 +33,6 @@ const (
 )
 
 // Event is the normalized, centralized security event written to the DB.
-// Raw contains the full original payload for forensic fidelity.
 type Event struct {
 	ID        string          `json:"id"`
 	Time      time.Time       `json:"time"`
@@ -39,8 +41,8 @@ type Event struct {
 	OS        string          `json:"os"`
 	EventType EventType       `json:"event_type"`
 	Severity  Severity        `json:"severity"`
-	Source    string          `json:"source"` // e.g. "Security", "Sysmon", "ETW"
-	Raw       json.RawMessage `json:"raw"`    // original unparsed payload
+	Source    string          `json:"source"`
+	Raw       json.RawMessage `json:"raw"`
 
 	// Process fields
 	PID         int    `json:"pid,omitempty"`

@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -40,14 +41,15 @@ func main() {
 	cfgPath := flag.String("config", "agent.yaml", "path to agent config file")
 	flag.Parse()
 
-	// Determine if we are running as an interactive process or a Windows service.
-	interactive, err := svc.IsWindowsService()
+	// Determine if we are running as a Windows service or interactively.
+	// IsWindowsService returns true when running under the SCM.
+	isService, err := svc.IsWindowsService()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "svc.IsWindowsService: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Handle install / uninstall / start / stop verbs.
+	// Handle install / uninstall verbs — always in interactive context.
 	if flag.NArg() > 0 {
 		if err := handleCommand(flag.Arg(0), *cfgPath); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -64,7 +66,7 @@ func main() {
 
 	logger := buildLogger(cfg.Log.Level, cfg.Log.Format)
 
-	if !interactive {
+	if isService {
 		// Running as a Windows service — hand control to the service manager.
 		if err := svc.Run(serviceName, &agentService{cfg: cfg, logger: logger}); err != nil {
 			logger.Error("service run failed", "err", err)
@@ -130,6 +132,24 @@ func (s *agentService) Execute(args []string, r <-chan svc.ChangeRequest, status
 // ---------------------------------------------------------------------------
 
 func run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+	// Ensure required directories exist before any subsystem tries to use them.
+	// This means the user never has to create folders manually.
+	dirsToCreate := []string{
+		`C:\Program Files\OpenSIEM\Agent\certs`,
+		`C:\ProgramData\OpenSIEM`,
+	}
+	if cfg.Queue.DBPath != "" {
+		dirsToCreate = append(dirsToCreate, filepath.Dir(cfg.Queue.DBPath))
+	}
+	for _, d := range dirsToCreate {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			logger.Warn("could not create directory", "path", d, "err", err)
+		}
+	}
+
+	// Ensure required Windows services are running before starting collectors.
+	ensureWindowsServices(logger)
+
 	// Resolve host metadata once.
 	agentID := cfg.Agent.ID
 	if agentID == "" {
@@ -211,38 +231,117 @@ func run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 		}()
 	}
 
+	// ── Rate limiter ─────────────────────────────────────────────────────
+	// Sits between collectors and the dispatcher — wraps eventCh.
+	var dispatchCh chan schema.Event
+	if cfg.Collector.RateLimit.Enabled {
+		rawCh := make(chan schema.Event, 4096)
+		dispatchCh = rawCh
+		// Replace eventCh with rawCh for all collectors below.
+		// The rate limiter will forward allowed events into the original eventCh.
+		rlCfg := collector.RateLimitConfig{
+			MaxPerSecond: cfg.Collector.RateLimit.MaxPerSecond,
+			DedupeWindow: cfg.Collector.RateLimit.DedupeWindow,
+		}
+		limiter := collector.NewRateLimiter(rlCfg)
+		go collector.FilteredChannel(rawCh, eventCh, limiter)
+		logger.Info("ratelimit: enabled", "max_per_sec", rlCfg.MaxPerSecond, "dedupe_window", rlCfg.DedupeWindow)
+	} else {
+		dispatchCh = eventCh
+	}
+
+	// Track active collector names for health reporting
+	activeCollectors := []string{}
+
 	if cfg.Collector.EventLog.Enabled {
 		c := collector.NewEventLogCollector(
 			cfg.Collector.EventLog.Channels,
-			agentID, hostInfo.Hostname, eventCh, logger,
+			agentID, hostInfo.Hostname, dispatchCh, logger,
 		)
 		startCollector("eventlog", c.Run)
+		activeCollectors = append(activeCollectors, "eventlog")
 	}
 
 	if cfg.Collector.Sysmon.Enabled {
-		c := collector.NewSysmonCollector(agentID, hostInfo.Hostname, eventCh, logger)
+		c := collector.NewSysmonCollector(agentID, hostInfo.Hostname, dispatchCh, logger)
 		startCollector("sysmon", c.Run)
+		activeCollectors = append(activeCollectors, "sysmon")
 	}
 
 	if cfg.Collector.Network.Enabled {
 		c := collector.NewNetworkCollector(
 			cfg.Collector.Network.PollInterval,
-			agentID, hostInfo.Hostname, eventCh, logger,
+			agentID, hostInfo.Hostname, dispatchCh, logger,
 		)
 		startCollector("network", c.Run)
+		activeCollectors = append(activeCollectors, "network")
 	}
 
 	if cfg.Collector.Process.Enabled {
-		c := collector.NewProcessCollector(agentID, hostInfo.Hostname, eventCh, logger)
+		c := collector.NewProcessCollector(agentID, hostInfo.Hostname, dispatchCh, logger)
 		startCollector("process", c.Run)
+		activeCollectors = append(activeCollectors, "process")
 	}
 
 	if cfg.Collector.Registry.Enabled {
 		c := collector.NewRegistryCollector(
 			cfg.Collector.Registry.Keys,
-			agentID, hostInfo.Hostname, eventCh, logger,
+			agentID, hostInfo.Hostname, dispatchCh, logger,
 		)
 		startCollector("registry", c.Run)
+		activeCollectors = append(activeCollectors, "registry")
+	}
+
+	if cfg.Collector.DNS.Enabled {
+		c := collector.NewDNSCollector(agentID, hostInfo.Hostname, dispatchCh, logger)
+		startCollector("dns", c.Run)
+		activeCollectors = append(activeCollectors, "dns")
+	}
+
+	if cfg.Collector.FIM.Enabled && len(cfg.Collector.FIM.Dirs) > 0 {
+		fimDirs := make([]collector.FIMConfig, len(cfg.Collector.FIM.Dirs))
+		for i, d := range cfg.Collector.FIM.Dirs {
+			fimDirs[i] = collector.FIMConfig{
+				Path:      d.Path,
+				Recursive: d.Recursive,
+				Exclude:   d.Exclude,
+			}
+		}
+		c := collector.NewFIMCollector(fimDirs, agentID, hostInfo.Hostname, dispatchCh, logger)
+		startCollector("fim", c.Run)
+		activeCollectors = append(activeCollectors, "fim")
+	}
+
+	if len(cfg.Collector.AppLogs) > 0 {
+		stateDir := filepath.Join(filepath.Dir(cfg.Queue.DBPath), "applog_state")
+		if err := os.MkdirAll(stateDir, 0700); err != nil {
+			logger.Warn("applog: could not create state dir", "dir", stateDir, "err", err)
+		}
+		appCfgs := make([]collector.AppLogConfig, len(cfg.Collector.AppLogs))
+		for i, a := range cfg.Collector.AppLogs {
+			appCfgs[i] = collector.AppLogConfig{
+				Name:      a.Name,
+				Path:      a.Path,
+				Format:    a.Format,
+				EventType: a.EventType,
+				Severity:  a.Severity,
+			}
+		}
+		c := collector.NewAppLogCollector(appCfgs, stateDir, agentID, hostInfo.Hostname, dispatchCh, logger)
+		startCollector("applog", c.Run)
+		activeCollectors = append(activeCollectors, "applog")
+		logger.Info("applog: collector started", "files", len(appCfgs))
+	}
+
+	if cfg.Collector.Health.Enabled {
+		c := collector.NewHealthReporter(
+			cfg.Collector.Health.Interval,
+			agentID, hostInfo.Hostname, cfg.Agent.Version,
+			activeCollectors,
+			eventCh, // health bypasses rate limiter — always send
+			logger,
+		)
+		startCollector("health", c.Run)
 	}
 
 	// Start the HTTP forwarder (reads from queue, not eventCh).
@@ -308,6 +407,106 @@ func uninstallService() error {
 	defer s.Close()
 
 	return s.Delete()
+}
+
+// ---------------------------------------------------------------------------
+// Windows service preflight
+// ---------------------------------------------------------------------------
+
+// ensureWindowsServices checks that services required for event collection
+// are running. If a service is disabled it re-enables it first, then starts it.
+func ensureWindowsServices(logger *slog.Logger) {
+	// EventLog is required for EvtSubscribe to work.
+	// WinRM is needed for RPC-based event log access.
+	required := []string{"EventLog", "WinRM"}
+
+	m, err := mgr.Connect()
+	if err != nil {
+		logger.Warn("preflight: cannot connect to service manager", "err", err)
+		return
+	}
+	defer m.Disconnect()
+
+	for _, name := range required {
+		s, err := m.OpenService(name)
+		if err != nil {
+			logger.Warn("preflight: cannot open service", "service", name, "err", err)
+			continue
+		}
+
+		status, err := s.Query()
+		if err != nil {
+			logger.Warn("preflight: cannot query service", "service", name, "err", err)
+			s.Close()
+			continue
+		}
+
+		if status.State == svc.Running {
+			logger.Info("preflight: service already running", "service", name)
+			s.Close()
+			continue
+		}
+
+		// Check if the service is disabled — if so, re-enable it first.
+		cfgSvc, err := s.Config()
+		if err == nil && cfgSvc.StartType == mgr.StartDisabled {
+			logger.Info("preflight: service is disabled, re-enabling", "service", name)
+			cfgSvc.StartType = mgr.StartAutomatic
+			if err := s.UpdateConfig(cfgSvc); err != nil {
+				logger.Warn("preflight: failed to re-enable service", "service", name, "err", err)
+				s.Close()
+				continue
+			}
+			logger.Info("preflight: service re-enabled", "service", name)
+		}
+
+		// Now start the service.
+		logger.Info("preflight: starting service", "service", name)
+		if err := s.Start(); err != nil {
+			logger.Warn("preflight: failed to start service", "service", name, "err", err)
+			s.Close()
+			continue
+		}
+
+		// Wait up to 15 seconds for the service to reach Running state.
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(500 * time.Millisecond)
+			status, err = s.Query()
+			if err != nil {
+				break
+			}
+			if status.State == svc.Running {
+				logger.Info("preflight: service started successfully", "service", name)
+				break
+			}
+		}
+		if status.State != svc.Running {
+			logger.Warn("preflight: service did not reach running state", "service", name)
+		}
+		s.Close()
+	}
+
+	// Check optional services — just log, never fail.
+	for _, name := range []string{"Sysmon", "SysmonDrv"} {
+		s, err := m.OpenService(name)
+		if err != nil {
+			logger.Warn("preflight: Sysmon not installed — install it for richer process/network telemetry", "service", name)
+			continue
+		}
+		status, err := s.Query()
+		if err != nil {
+			s.Close()
+			continue
+		}
+		if status.State == svc.Running {
+			logger.Info("preflight: Sysmon is running", "service", name)
+		} else {
+			logger.Warn("preflight: Sysmon installed but not running", "service", name)
+		}
+		s.Close()
+		break // only need to find one of Sysmon/SysmonDrv
+	}
 }
 
 // ---------------------------------------------------------------------------

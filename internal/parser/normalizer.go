@@ -52,10 +52,10 @@ func (n *Normalizer) Normalize(ev *schema.Event) error {
 
 	// ── String hygiene ─────────────────────────────────────────────────────
 	ev.UserName = sanitize(ev.UserName)
-	ev.Domain = sanitize(ev.Domain)
+	ev.Domain   = sanitize(ev.Domain)
 	ev.CommandLine = truncate(ev.CommandLine, 4096)
-	ev.FilePath = sanitize(ev.FilePath)
-	ev.RegKey = sanitize(ev.RegKey)
+	ev.FilePath    = sanitize(ev.FilePath)
+	ev.RegKey      = sanitize(ev.RegKey)
 
 	// ── Well-known EventID enrichment (Windows Security channel) ──────────
 	ev.Severity = adjustSeverityByEventID(ev.EventID, ev.Severity)
@@ -117,18 +117,18 @@ func classifyByEventID(id uint32, source string) schema.EventType {
 // adjustSeverityByEventID raises the severity for high-signal Windows events.
 func adjustSeverityByEventID(id uint32, current schema.Severity) schema.Severity {
 	highSeverityIDs := map[uint32]schema.Severity{
-		4625: schema.SeverityMedium, // failed logon
-		4648: schema.SeverityMedium, // explicit credential use
-		4672: schema.SeverityMedium, // admin logon
-		4698: schema.SeverityHigh,   // scheduled task created
-		4702: schema.SeverityHigh,   // scheduled task updated
-		4720: schema.SeverityHigh,   // user account created
-		4728: schema.SeverityHigh,   // member added to security group
-		4732: schema.SeverityHigh,   // member added to local group
-		4756: schema.SeverityHigh,   // member added to universal group
-		4776: schema.SeverityMedium, // credential validation
-		5156: schema.SeverityLow,    // network connection allowed
-		5157: schema.SeverityMedium, // network connection blocked
+		4625: schema.SeverityMedium,  // failed logon
+		4648: schema.SeverityMedium,  // explicit credential use
+		4672: schema.SeverityMedium,  // admin logon
+		4698: schema.SeverityHigh,    // scheduled task created
+		4702: schema.SeverityHigh,    // scheduled task updated
+		4720: schema.SeverityHigh,    // user account created
+		4728: schema.SeverityHigh,    // member added to security group
+		4732: schema.SeverityHigh,    // member added to local group
+		4756: schema.SeverityHigh,    // member added to universal group
+		4776: schema.SeverityMedium,  // credential validation
+		5156: schema.SeverityLow,     // network connection allowed
+		5157: schema.SeverityMedium,  // network connection blocked
 	}
 
 	if mapped, ok := highSeverityIDs[id]; ok {
