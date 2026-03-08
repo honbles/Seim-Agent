@@ -138,13 +138,14 @@ func (d *DNSCollector) mapDNSEvent(ev schema.Event) *schema.Event {
 		AgentID:     d.agentID,
 		Host:        d.host,
 		OS:          "windows",
-		EventType:   schema.EventTypeNetwork,
+		EventType:   schema.EventTypeDNS,
 		Severity:    sev,
 		Source:      "DNS-Client",
 		EventID:     ev.EventID,
 		Channel:     dnsClientChannel,
 		PID:         ev.PID,
 		ProcessName: ev.ProcessName,
+		DstIP:       queryName,    // store domain in DstIP so search/display works
 		Raw:         enrichedRaw,
 	}
 }
