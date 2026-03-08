@@ -145,7 +145,6 @@ func (d *DNSCollector) mapDNSEvent(ev schema.Event) *schema.Event {
 		Channel:     dnsClientChannel,
 		PID:         ev.PID,
 		ProcessName: ev.ProcessName,
-		DstIP:       queryName, // store queried hostname in DstIP for searchability
 		Raw:         enrichedRaw,
 	}
 }

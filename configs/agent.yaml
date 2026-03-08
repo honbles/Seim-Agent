@@ -1,12 +1,12 @@
 agent:
   # Unique agent identifier. Leave empty to use the machine hostname.
   id: ""
-  version: "0.1.0"
+  version: "0.2.0"
 
 collector:
+
   event_log:
     enabled: true
-    # Windows Event Log channels to subscribe to.
     channels:
       - Security
       - System
@@ -15,16 +15,15 @@ collector:
     poll_interval: 5s
 
   sysmon:
-    # Requires Sysmon to be installed on the host.
+    # Requires Sysmon to be installed. If not installed the channel is skipped.
     enabled: true
 
   network:
     enabled: true
-    # Interval between TCP/UDP connection snapshots.
     poll_interval: 30s
 
   process:
-    # ETW-based real-time process create/terminate events.
+    # ETW-based real-time process create/terminate. Falls back to WMI polling.
     enabled: true
 
   registry:
@@ -35,88 +34,76 @@ collector:
       - HKLM\SYSTEM\CurrentControlSet\Services
       - HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
 
-# ── Application Log Tailing ───────────────────────────────────────────────────
-# Each entry tails a log file and ships every new line as an event.
-# The collector resumes from where it left off after an agent restart.
-#
-# format options:
-#   json     — each line is a JSON object; time/level/user/ip extracted automatically
-#   text     — each line stored verbatim (no parsing)
-#   combined — Apache / nginx combined access log format
-#
-# severity: default 1–5 for lines from this file
-#   JSON logs with a level/severity field override this per line.
-#
-# Remove the leading '#' from any block below to enable it, or add your own.
+  # DNS query/response telemetry via Microsoft-Windows-DNS-Client/Operational.
+  # No Sysmon required. The agent auto-enables this channel if it's off.
+  dns:
+    enabled: true
 
-app_logs: []
+  # File Integrity Monitoring — watches directories for create/modify/delete.
+  fim:
+    enabled: true
+    dirs:
+      - path: "C:\\Windows\\System32"
+        recursive: false
+        exclude:
+          - "*.log"
+          - "*.tmp"
+          - "*.etl"
+      - path: "C:\\Windows\\SysWOW64"
+        recursive: false
+        exclude:
+          - "*.log"
+          - "*.tmp"
+          - "*.etl"
+      # Add your own sensitive paths here, e.g.:
+      # - path: "C:\\inetpub\\wwwroot"
+      #   recursive: true
+      #   exclude: []
 
-# ── Examples (uncomment and edit paths to use) ────────────────────────────────
+  # Agent health heartbeat — reports queue depth, dropped events, memory usage.
+  health:
+    enabled: true
+    interval: 60s
 
-# JSON application log — any app that writes structured JSON logs
-# app_logs:
-#   - name: "my-api"
-#     path: "C:\\logs\\my-api\\app.log"
-#     format: "json"
-#     event_type: "applog"
-#     severity: 2
-#
-# nginx access log (combined format)
-#   - name: "nginx-access"
-#     path: "C:\\nginx\\logs\\access.log"
-#     format: "combined"
-#     event_type: "weblog"
-#     severity: 1
-#
-# Plain text log
-#   - name: "my-service"
-#     path: "C:\\logs\\my-service\\service.log"
-#     format: "text"
-#     event_type: "applog"
-#     severity: 1
-#
-# Multiple files in one block — just keep adding list entries:
-# app_logs:
-#   - name: "api"
-#     path: "C:\\logs\\api.log"
-#     format: "json"
-#     event_type: "applog"
-#     severity: 2
-#   - name: "worker"
-#     path: "C:\\logs\\worker.log"
-#     format: "json"
-#     event_type: "applog"
-#     severity: 2
-#   - name: "nginx"
-#     path: "C:\\nginx\\logs\\access.log"
-#     format: "combined"
-#     event_type: "weblog"
-#     severity: 1
+  # Per-source rate limiting and deduplication.
+  # Prevents log floods from filling the queue and backend.
+  rate_limit:
+    enabled: true
+    max_per_second: 500   # max events/sec per source
+    dedupe_window: 5s     # suppress duplicate event IDs within this window
+
+  # Application log tailing — ship any log file to the SIEM backend.
+  # format: json | text | combined (apache/nginx)
+  app_logs: []
+
+  # Examples (uncomment and edit paths):
+  # app_logs:
+  #   - name: "my-api"
+  #     path: "C:\\logs\\my-api\\app.log"
+  #     format: "json"
+  #     event_type: "applog"
+  #     severity: 2
+  #
+  #   - name: "nginx-access"
+  #     path: "C:\\nginx\\logs\\access.log"
+  #     format: "combined"
+  #     event_type: "weblog"
+  #     severity: 1
 
 forwarder:
-  # Backend ingest API endpoint.
-  backend_url: "https://siem.example.internal:8443"
-
-  # Number of events per HTTP POST.
+  backend_url: "https://192.168.1.140:8443"
   batch_size: 200
-
-  # How often to flush the queue even if batch_size not reached.
   flush_interval: 5s
-
-  # mTLS — comment out to use API key auth instead.
-  cert_file: "certs/agent.crt"
-  key_file:  "certs/agent.key"
+  # mTLS — comment out to use API key auth
+  # cert_file: "certs/agent.crt"
+  # key_file:  "certs/agent.key"
   ca_file:   "certs/ca.crt"
-
-  # API key fallback (used when cert/key are not set).
-  # api_key: "your-secret-key-here"
+  api_key: "a3f8b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
 
 queue:
-  # Path to the local SQLite buffer database.
   db_path: "C:\\ProgramData\\OpenSIEM\\queue"
-  # Maximum number of events to buffer before evicting oldest.
   max_rows: 100000
 
 log:
-  level: "info"   # debug | info | warn | error
-  format: "json"  # json | text
+  level: "info"
+  format: "json"
