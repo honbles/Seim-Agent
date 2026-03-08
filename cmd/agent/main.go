@@ -20,7 +20,9 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
@@ -28,6 +30,7 @@ import (
 	"opensiem/agent/internal/config"
 	"opensiem/agent/internal/forwarder"
 	"opensiem/agent/internal/parser"
+	sysmonpkg "opensiem/agent/internal/sysmon"
 	"opensiem/agent/pkg/schema"
 )
 
@@ -74,6 +77,9 @@ func main() {
 		}
 		return
 	}
+
+	// Enable Windows audit policies for full command line visibility
+	enableAuditPolicies(logger)
 
 	// Interactive mode — run until SIGINT/SIGTERM.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -487,25 +493,153 @@ func ensureWindowsServices(logger *slog.Logger) {
 		s.Close()
 	}
 
-	// Check optional services — just log, never fail.
-	for _, name := range []string{"Sysmon", "SysmonDrv"} {
-		s, err := m.OpenService(name)
-		if err != nil {
-			logger.Warn("preflight: Sysmon not installed — install it for richer process/network telemetry", "service", name)
-			continue
-		}
-		status, err := s.Query()
-		if err != nil {
-			s.Close()
-			continue
-		}
-		if status.State == svc.Running {
-			logger.Info("preflight: Sysmon is running", "service", name)
+	// Sysmon — auto-install if not present.
+	// If not already admin, attempt to self-elevate via ShellExecute runas.
+	switch sysmonpkg.Check() {
+	case sysmonpkg.StatusRunning:
+		logger.Info("preflight: Sysmon is running ✓")
+	case sysmonpkg.StatusInstalled:
+		if sysmonpkg.IsAdmin() {
+			sysmonpkg.EnsureInstalled(logger)
 		} else {
-			logger.Warn("preflight: Sysmon installed but not running", "service", name)
+			logger.Warn("preflight: Sysmon installed but not running — attempting to start via elevation")
+			if err := elevatedSysmonSetup(logger); err != nil {
+				logger.Warn("preflight: elevation failed — start agent as Administrator", "err", err)
+			}
 		}
-		s.Close()
-		break // only need to find one of Sysmon/SysmonDrv
+	case sysmonpkg.StatusNotInstalled:
+		if sysmonpkg.IsAdmin() {
+			logger.Info("preflight: Sysmon not installed — auto-installing now")
+			sysmonpkg.EnsureInstalled(logger)
+		} else {
+			logger.Warn("preflight: Sysmon not installed — requesting elevation to install")
+			if err := elevatedSysmonSetup(logger); err != nil {
+				logger.Warn("preflight: could not auto-install Sysmon (run agent as Administrator for auto-install)", "err", err)
+			}
+		}
+	}
+}
+
+// elevatedSysmonSetup re-launches this same agent.exe with runas (UAC prompt)
+// just to perform the Sysmon install/start, then returns.
+// The current (non-elevated) agent continues running normally after this.
+func elevatedSysmonSetup(logger *slog.Logger) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("get executable: %w", err)
+	}
+
+	// ShellExecute with "runas" verb triggers UAC prompt
+	modShell32    := windows.NewLazySystemDLL("shell32.dll")
+	shellExecuteW := modShell32.NewProc("ShellExecuteW")
+
+	operation, _ := windows.UTF16PtrFromString("runas")
+	file, _      := windows.UTF16PtrFromString(exePath)
+	params, _    := windows.UTF16PtrFromString("--sysmon-setup-only")
+	dir, _       := windows.UTF16PtrFromString(filepath.Dir(exePath))
+
+	const SW_HIDE = 0
+	ret, _, err := shellExecuteW.Call(
+		0,
+		uintptr(unsafe.Pointer(operation)),
+		uintptr(unsafe.Pointer(file)),
+		uintptr(unsafe.Pointer(params)),
+		uintptr(unsafe.Pointer(dir)),
+		SW_HIDE,
+	)
+	// ShellExecute returns >32 on success
+	if ret <= 32 {
+		return fmt.Errorf("ShellExecuteW runas: %d %w", ret, err)
+	}
+
+	logger.Info("preflight: UAC elevation launched for Sysmon setup — accept the prompt to install Sysmon")
+	// Give the elevated process time to complete install before we continue
+	time.Sleep(15 * time.Second)
+
+	// Check if it worked
+	if sysmonpkg.Check() == sysmonpkg.StatusRunning {
+		logger.Info("preflight: Sysmon auto-install succeeded via elevation ✓")
+		return nil
+	}
+	return fmt.Errorf("Sysmon still not running after elevated setup attempt")
+}
+
+// ---------------------------------------------------------------------------
+// Audit policy enablement
+// ---------------------------------------------------------------------------
+
+// enableAuditPolicies ensures Windows is configured to emit the event IDs
+// that OpenSIEM relies on — specifically:
+//   - Event 4688 with command line (process creation with full cmdline)
+//   - PowerShell Script Block Logging (4104)
+//   - PowerShell Module Logging (4103)
+//
+// These settings are written to the registry and take effect immediately.
+// Requires administrator privileges — silently skips on failure.
+func enableAuditPolicies(logger *slog.Logger) {
+	modAdvapi32Reg := windows.NewLazySystemDLL("advapi32.dll")
+	regSetValueEx := modAdvapi32Reg.NewProc("RegSetValueExW")
+	regOpenKeyEx  := modAdvapi32Reg.NewProc("RegOpenKeyExW")
+	regCloseKey   := modAdvapi32Reg.NewProc("RegCloseKey")
+
+	setDWORD := func(hive windows.Handle, path, name string, val uint32) error {
+		keyPtr, _ := windows.UTF16PtrFromString(path)
+		namePtr, _ := windows.UTF16PtrFromString(name)
+		const KEY_SET_VALUE = 0x0002
+		const KEY_WOW64_64KEY = 0x0100
+		var hkey windows.Handle
+		ret, _, _ := regOpenKeyEx.Call(
+			uintptr(hive), uintptr(unsafe.Pointer(keyPtr)),
+			0, KEY_SET_VALUE|KEY_WOW64_64KEY,
+			uintptr(unsafe.Pointer(&hkey)),
+		)
+		if ret != 0 {
+			return fmt.Errorf("RegOpenKeyEx: %d", ret)
+		}
+		defer regCloseKey.Call(uintptr(hkey))
+		ret, _, _ = regSetValueEx.Call(
+			uintptr(hkey), uintptr(unsafe.Pointer(namePtr)),
+			0, 4, // REG_DWORD
+			uintptr(unsafe.Pointer(&val)),
+			4,
+		)
+		if ret != 0 {
+			return fmt.Errorf("RegSetValueEx: %d", ret)
+		}
+		return nil
+	}
+
+	// 1. Enable Process Creation auditing with command line inclusion (Event 4688 + cmdline)
+	//    HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit
+	//    ProcessCreationIncludeCmdLine_Enabled = 1
+	if err := setDWORD(windows.HKEY_LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit`,
+		"ProcessCreationIncludeCmdLine_Enabled", 1); err != nil {
+		logger.Warn("preflight: could not enable 4688 command line logging (need admin)", "err", err)
+	} else {
+		logger.Info("preflight: enabled Event 4688 command line inclusion")
+	}
+
+	// 2. Enable PowerShell Script Block Logging (Event 4104 — captures ACTUAL script text)
+	//    HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging
+	//    EnableScriptBlockLogging = 1
+	if err := setDWORD(windows.HKEY_LOCAL_MACHINE,
+		`SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging`,
+		"EnableScriptBlockLogging", 1); err != nil {
+		logger.Warn("preflight: could not enable PowerShell Script Block Logging", "err", err)
+	} else {
+		logger.Info("preflight: enabled PowerShell Script Block Logging (Event 4104)")
+	}
+
+	// 3. Enable PowerShell Module Logging (Event 4103 — pipeline execution details)
+	//    HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging
+	//    EnableModuleLogging = 1
+	if err := setDWORD(windows.HKEY_LOCAL_MACHINE,
+		`SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging`,
+		"EnableModuleLogging", 1); err != nil {
+		logger.Warn("preflight: could not enable PowerShell Module Logging", "err", err)
+	} else {
+		logger.Info("preflight: enabled PowerShell Module Logging (Event 4103)")
 	}
 }
 

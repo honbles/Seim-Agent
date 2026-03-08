@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"syscall"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -407,7 +408,7 @@ func (p *ProcessCollector) runWMIFallback(ctx context.Context) error {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	prev := map[uint32]string{} // pid -> name
+	prev := map[uint32]ProcessInfo{} // pid -> ProcessInfo
 
 	for {
 		select {
@@ -437,8 +438,21 @@ func (p *ProcessCollector) runWMIFallback(ctx context.Context) error {
 	}
 }
 
-func (p *ProcessCollector) emitWMIEvent(pid uint32, name, action string, sev schema.Severity) {
-	rawData := map[string]interface{}{"action": action, "pid": pid, "name": name}
+func (p *ProcessCollector) emitWMIEvent(pid uint32, info ProcessInfo, action string, sev schema.Severity) {
+	// Elevate severity for interesting processes
+	cmdLow := strings.ToLower(info.CommandLine)
+	nameLow := strings.ToLower(info.Name)
+	if sev == schema.SeverityLow && containsInteresting(nameLow, cmdLow) {
+		sev = schema.SeverityMedium
+	}
+
+	rawData := map[string]interface{}{
+		"action":       action,
+		"pid":          pid,
+		"name":         info.Name,
+		"command_line": info.CommandLine,
+		"ppid":         info.PPID,
+	}
 	rawJSON, _ := json.Marshal(rawData)
 	ev := schema.Event{
 		Time:        time.Now().UTC(),
@@ -449,7 +463,9 @@ func (p *ProcessCollector) emitWMIEvent(pid uint32, name, action string, sev sch
 		Severity:    sev,
 		Source:      "WMI/Process",
 		PID:         int(pid),
-		ProcessName: name,
+		PPID:        int(info.PPID),
+		ProcessName: info.Name,
+		CommandLine: info.CommandLine,
 		Raw:         rawJSON,
 	}
 	select {
@@ -458,8 +474,31 @@ func (p *ProcessCollector) emitWMIEvent(pid uint32, name, action string, sev sch
 	}
 }
 
-// snapshotProcesses uses the Windows toolhelp snapshot API.
-func snapshotProcesses() (map[uint32]string, error) {
+func containsInteresting(name, cmd string) bool {
+	interesting := []string{
+		"powershell", "cmd.exe", "wscript", "cscript", "mshta", "rundll32",
+		"regsvr32", "certutil", "bitsadmin", "wmic", "msiexec", "psexec",
+		"net.exe", "netsh", "schtasks", "reg.exe", "sc.exe", "whoami",
+		"mimikatz", "procdump", "git", "python", "node", "bash",
+	}
+	for _, s := range interesting {
+		if strings.Contains(name, s) || strings.Contains(cmd, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProcessInfo holds snapshot data for a running process.
+type ProcessInfo struct {
+	Name        string
+	CommandLine string
+	PPID        uint32
+}
+
+// snapshotProcesses uses the Windows toolhelp snapshot API for names/PIDs,
+// then queries NtQueryInformationProcess for command lines.
+func snapshotProcesses() (map[uint32]ProcessInfo, error) {
 	modKernel32 := windows.NewLazySystemDLL("kernel32.dll")
 	procCreateSnapshot := modKernel32.NewProc("CreateToolhelp32Snapshot")
 	procProcess32First := modKernel32.NewProc("Process32FirstW")
@@ -473,28 +512,121 @@ func snapshotProcesses() (map[uint32]string, error) {
 	defer windows.CloseHandle(windows.Handle(snapshot))
 
 	type PROCESSENTRY32 struct {
-		Size              uint32
-		CntUsage          uint32
-		Th32ProcessID     uint32
-		Th32DefaultHeapID uintptr
-		Th32ModuleID      uint32
-		CntThreads        uint32
+		Size                uint32
+		CntUsage            uint32
+		Th32ProcessID       uint32
+		Th32DefaultHeapID   uintptr
+		Th32ModuleID        uint32
+		CntThreads          uint32
 		Th32ParentProcessID uint32
-		PcPriClassBase    int32
-		Flags             uint32
-		ExeFile           [260]uint16
+		PcPriClassBase      int32
+		Flags               uint32
+		ExeFile             [260]uint16
 	}
 
-	result := make(map[uint32]string)
+	result := make(map[uint32]ProcessInfo)
 	var entry PROCESSENTRY32
 	entry.Size = uint32(unsafe.Sizeof(entry))
 
 	ret, _, _ := procProcess32First.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
 	for ret != 0 {
 		name := windows.UTF16ToString(entry.ExeFile[:])
-		result[entry.Th32ProcessID] = name
+		cmdLine := readProcessCommandLine(entry.Th32ProcessID)
+		result[entry.Th32ProcessID] = ProcessInfo{
+			Name:        name,
+			CommandLine: cmdLine,
+			PPID:        entry.Th32ParentProcessID,
+		}
 		entry.Size = uint32(unsafe.Sizeof(entry))
 		ret, _, _ = procProcess32Next.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
 	}
 	return result, nil
+}
+
+// readProcessCommandLine reads the command line of a process using
+// NtQueryInformationProcess → PEB → ProcessParameters.
+func readProcessCommandLine(pid uint32) string {
+	const PROCESS_QUERY_INFORMATION = 0x0400
+	const PROCESS_VM_READ           = 0x0010
+
+	handle, err := windows.OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ, false, pid)
+	if err != nil {
+		return ""
+	}
+	defer windows.CloseHandle(handle)
+
+	type UNICODE_STRING struct {
+		Length    uint16
+		MaxLength uint16
+		_         uint32 // padding on 64-bit
+		Buffer    uintptr
+	}
+	type RTL_USER_PROCESS_PARAMETERS struct {
+		_              [112]byte // offset to CommandLine varies — skip via known offset
+		CommandLine    UNICODE_STRING
+	}
+
+	// Use NtQueryInformationProcess to get PBI (ProcessBasicInformation)
+	modNtdll2 := windows.NewLazySystemDLL("ntdll.dll")
+	ntQuery := modNtdll2.NewProc("NtQueryInformationProcess")
+
+	type PROCESS_BASIC_INFORMATION struct {
+		ExitStatus                   uintptr
+		PebBaseAddress               uintptr
+		AffinityMask                 uintptr
+		BasePriority                 uintptr
+		UniqueProcessId              uintptr
+		InheritedFromUniqueProcessId uintptr
+	}
+
+	var pbi PROCESS_BASIC_INFORMATION
+	var returnLen uint32
+	ret, _, _ := ntQuery.Call(
+		uintptr(handle),
+		0, // ProcessBasicInformation
+		uintptr(unsafe.Pointer(&pbi)),
+		uintptr(unsafe.Sizeof(pbi)),
+		uintptr(unsafe.Pointer(&returnLen)),
+	)
+	if ret != 0 || pbi.PebBaseAddress == 0 {
+		return ""
+	}
+
+	// Read ProcessParameters pointer from PEB (offset 0x20 on 64-bit)
+	var procParamsPtr uintptr
+	if err := windows.ReadProcessMemory(handle,
+		pbi.PebBaseAddress+0x20,
+		(*byte)(unsafe.Pointer(&procParamsPtr)),
+		uintptr(unsafe.Sizeof(procParamsPtr)), nil); err != nil {
+		return ""
+	}
+
+	// Read CommandLine UNICODE_STRING from ProcessParameters (offset 0x70 on 64-bit)
+	type unicodeStr struct {
+		Length    uint16
+		MaxLength uint16
+		_         [4]byte
+		Buffer    uintptr
+	}
+	var cmdStr unicodeStr
+	if err := windows.ReadProcessMemory(handle,
+		procParamsPtr+0x70,
+		(*byte)(unsafe.Pointer(&cmdStr)),
+		uintptr(unsafe.Sizeof(cmdStr)), nil); err != nil {
+		return ""
+	}
+
+	if cmdStr.Length == 0 || cmdStr.Buffer == 0 {
+		return ""
+	}
+
+	// Read the actual command line string
+	buf := make([]uint16, cmdStr.Length/2)
+	if err := windows.ReadProcessMemory(handle,
+		cmdStr.Buffer,
+		(*byte)(unsafe.Pointer(&buf[0])),
+		uintptr(cmdStr.Length), nil); err != nil {
+		return ""
+	}
+	return windows.UTF16ToString(buf)
 }

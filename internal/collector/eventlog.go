@@ -350,7 +350,72 @@ func classifyAndEnrichEvent(ev *schema.Event, data map[string]string) {
 		if v := data["ImagePath"]; v != "" {
 			ev.ImagePath = v
 		}
+	// PowerShell — Module logging (4103) and Script Block logging (4104)
+	case 4103:
+		ev.EventType = schema.EventTypeProcess
+		ev.Severity = schema.SeverityLow
+		ev.ProcessName = "powershell"
+		// Payload contains the actual command/script that ran
+		if v := firstOf(data, "Payload", "ScriptBlockText", "MessageNumber"); v != "" {
+			ev.CommandLine = v
+		}
+		if v := firstOf(data, "HostApplication", "Path"); v != "" {
+			ev.ImagePath = v
+		}
+		// Mark as suspicious if contains common attack patterns
+		cmdLower := strings.ToLower(ev.CommandLine)
+		if containsAnyStr(cmdLower, "-enc", "downloadstring", "iex", "invoke-expression",
+			"webclient", "bypass", "hidden", "frombase64", "reflection.assembly") {
+			ev.Severity = schema.SeverityHigh
+		}
+	case 4104:
+		ev.EventType = schema.EventTypeProcess
+		ev.Severity = schema.SeverityLow
+		ev.ProcessName = "powershell"
+		// 4104 = Script Block Logging — captures the ACTUAL script text
+		if v := firstOf(data, "ScriptBlockText", "Payload"); v != "" {
+			ev.CommandLine = v
+		}
+		if v := data["Path"]; v != "" {
+			ev.ImagePath = v
+		}
+		cmdLower := strings.ToLower(ev.CommandLine)
+		if containsAnyStr(cmdLower, "-enc", "downloadstring", "iex", "invoke-expression",
+			"webclient", "bypass", "hidden", "frombase64", "reflection.assembly",
+			"mimikatz", "invoke-mimikatz", "shellcode") {
+			ev.Severity = schema.SeverityHigh
+		}
+	// Windows Defender detections
+	case 1116, 1117:
+		ev.EventType = schema.EventTypeProcess
+		ev.Severity = schema.SeverityCritical
+		if v := firstOf(data, "Threat Name", "ThreatName"); v != "" {
+			ev.ProcessName = v
+		}
+		if v := firstOf(data, "Path", "Process Name"); v != "" {
+			ev.FilePath = v
+		}
+	// AppLocker blocked execution
+	case 8004, 8007:
+		ev.EventType = schema.EventTypeProcess
+		ev.Severity = schema.SeverityHigh
+		if v := firstOf(data, "FilePath", "FullFilePath"); v != "" {
+			ev.FilePath = v
+			ev.ImagePath = v
+		}
+		if v := data["User"]; v != "" {
+			ev.UserName = v
+		}
 	}
+}
+
+func containsAnyStr(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func renderXML(evHandle windows.Handle) ([]byte, error) {

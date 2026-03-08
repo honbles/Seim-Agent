@@ -1,0 +1,8 @@
+# Place Sysmon64.exe here to build with embedded binary.
+# Then compile with: GOOS=windows GOARCH=amd64 go build -tags embed_sysmon ./cmd/agent/
+#
+# Download from: https://download.sysinternals.com/files/Sysmon.zip
+# Extract Sysmon64.exe and place it in this directory.
+#
+# Without this file, the agent will auto-download Sysmon at runtime
+# when running as Administrator on an internet-connected endpoint.
