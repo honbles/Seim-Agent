@@ -2,7 +2,7 @@
 
 package collector
 
-// dns.go — captures DNS queries and responses via the Windows Event Log
+// dns.go - captures DNS queries and responses via the Windows Event Log
 // channel Microsoft-Windows-DNS-Client/Operational.
 // No Sysmon required. Works on all Windows versions with DNS Client logging enabled.
 // The agent auto-enables the channel at startup if it's not already active.
@@ -17,6 +17,18 @@ import (
 
 	"obsidianwatch/agent/pkg/schema"
 )
+
+// dnsFirstOf returns the first non-empty value for the given keys in m.
+func dnsFirstOf(m map[string]string, keys ...string) string {
+	for _, k := range keys {
+		if v := m[k]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+
 
 const dnsClientChannel = "Microsoft-Windows-DNS-Client/Operational"
 
@@ -102,10 +114,10 @@ func (d *DNSCollector) mapDNSEvent(ev schema.Event) *schema.Event {
 		return nil
 	}
 
-	queryName := firstOf(dataMap, "QueryName", "Name", "DnsQueryRequest")
-	queryType := firstOf(dataMap, "QueryType", "Type")
-	queryResults := firstOf(dataMap, "QueryResults", "Results", "DnsQueryResults")
-	queryStatus := firstOf(dataMap, "QueryStatus", "Status")
+	queryName := dnsFirstOf(dataMap, "QueryName", "Name", "DnsQueryRequest")
+	queryType := dnsFirstOf(dataMap, "QueryType", "Type")
+	queryResults := dnsFirstOf(dataMap, "QueryResults", "Results", "DnsQueryResults")
+	queryStatus := dnsFirstOf(dataMap, "QueryStatus", "Status")
 
 	if queryName == "" {
 		return nil

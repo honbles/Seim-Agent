@@ -578,23 +578,29 @@ func elevatedSysmonSetup(logger *slog.Logger) error {
 // Requires administrator privileges — silently skips on failure.
 func enableAuditPolicies(logger *slog.Logger) {
 	modAdvapi32Reg := windows.NewLazySystemDLL("advapi32.dll")
-	regSetValueEx := modAdvapi32Reg.NewProc("RegSetValueExW")
-	regOpenKeyEx  := modAdvapi32Reg.NewProc("RegOpenKeyExW")
-	regCloseKey   := modAdvapi32Reg.NewProc("RegCloseKey")
+	regSetValueEx  := modAdvapi32Reg.NewProc("RegSetValueExW")
+	regCreateKeyEx := modAdvapi32Reg.NewProc("RegCreateKeyExW")
+	regCloseKey    := modAdvapi32Reg.NewProc("RegCloseKey")
 
 	setDWORD := func(hive windows.Handle, path, name string, val uint32) error {
 		keyPtr, _ := windows.UTF16PtrFromString(path)
 		namePtr, _ := windows.UTF16PtrFromString(name)
-		const KEY_SET_VALUE = 0x0002
+		const KEY_SET_VALUE  = 0x0002
 		const KEY_WOW64_64KEY = 0x0100
+		const REG_OPTION_NON_VOLATILE = 0x00000000
 		var hkey windows.Handle
-		ret, _, _ := regOpenKeyEx.Call(
+		var disposition uint32
+		// RegCreateKeyEx creates the key AND all intermediate keys if they don't exist
+		ret, _, _ := regCreateKeyEx.Call(
 			uintptr(hive), uintptr(unsafe.Pointer(keyPtr)),
-			0, KEY_SET_VALUE|KEY_WOW64_64KEY,
+			0, 0, REG_OPTION_NON_VOLATILE,
+			KEY_SET_VALUE|KEY_WOW64_64KEY,
+			0,
 			uintptr(unsafe.Pointer(&hkey)),
+			uintptr(unsafe.Pointer(&disposition)),
 		)
 		if ret != 0 {
-			return fmt.Errorf("RegOpenKeyEx: %d", ret)
+			return fmt.Errorf("RegCreateKeyEx: %d", ret)
 		}
 		defer regCloseKey.Call(uintptr(hkey))
 		ret, _, _ = regSetValueEx.Call(

@@ -2,7 +2,7 @@
 
 package collector
 
-// eventlog.go — reads Windows Event Log channels via wevtapi.dll.
+// eventlog.go - reads Windows Event Log channels via wevtapi.dll.
 // Full XML parsing: EventID, time, computer, user, and all EventData
 // key-value pairs are extracted into normalized schema.Event fields.
 
@@ -350,7 +350,221 @@ func classifyAndEnrichEvent(ev *schema.Event, data map[string]string) {
 		if v := data["ImagePath"]; v != "" {
 			ev.ImagePath = v
 		}
-	// PowerShell — Module logging (4103) and Script Block logging (4104)
+
+	// -- Sysmon Events ----------------------------------------------------------
+	// EventID 1 - Process Create
+	case 1:
+		ev.EventType = schema.EventTypeProcess
+		ev.Source = "Sysmon"
+		if v := data["Image"]; v != "" {
+			ev.ImagePath = v
+			idx := strings.LastIndex(v, "\\")
+			if idx >= 0 {
+				ev.ProcessName = v[idx+1:]
+			} else {
+				ev.ProcessName = v
+			}
+		}
+		if v := data["CommandLine"]; v != "" {
+			ev.CommandLine = v
+		}
+		if v := data["ProcessId"]; v != "" {
+			if pid, err := parseHexOrDec(v); err == nil { ev.PID = pid }
+		}
+		if v := data["ParentProcessId"]; v != "" {
+			if ppid, err := parseHexOrDec(v); err == nil { ev.PPID = ppid }
+		}
+		if v := data["ParentImage"]; v != "" {
+			// parent image path available in v if needed
+		}
+		if v := firstOf(data, "User", "SubjectUserName"); v != "" {
+			ev.UserName = v
+		}
+		ev.Severity = schema.SeverityLow
+		// Elevate suspicious process names / command lines
+		cmdLower := strings.ToLower(ev.CommandLine + ev.ProcessName)
+		if containsAnyStr(cmdLower, "mimikatz", "meterpreter", "cobalt", "shellcode",
+			"invoke-expression", "downloadstring", "-enc", "bypass", "webclient") {
+			ev.Severity = schema.SeverityCritical
+		} else if containsAnyStr(cmdLower, "powershell", "wscript", "cscript", "mshta",
+			"regsvr32", "rundll32", "certutil", "bitsadmin", "wmic", "psexec") {
+			ev.Severity = schema.SeverityMedium
+		}
+
+	// EventID 2 - File creation time changed
+	case 2:
+		ev.EventType = schema.EventTypeFile
+		ev.Source = "Sysmon"
+		ev.FilePath = data["TargetFilename"]
+		ev.Severity = schema.SeverityMedium
+
+	// EventID 3 - Network connection
+	case 3:
+		ev.EventType = schema.EventTypeNetwork
+		ev.Source = "Sysmon"
+		ev.SrcIP = data["SourceIp"]
+		ev.DstIP = data["DestinationIp"]
+		if p, err := strconv.Atoi(data["SourcePort"]); err == nil { ev.SrcPort = p }
+		if p, err := strconv.Atoi(data["DestinationPort"]); err == nil { ev.DstPort = p }
+		ev.Proto = strings.ToLower(data["Protocol"])
+		if v := data["Image"]; v != "" {
+			idx := strings.LastIndex(v, "\\")
+			if idx >= 0 {
+				ev.ProcessName = v[idx+1:]
+			} else {
+				ev.ProcessName = v
+			}
+		}
+		ev.Severity = schema.SeverityLow
+
+	// EventID 5 - Process terminated
+	case 5:
+		ev.EventType = schema.EventTypeProcess
+		ev.Source = "Sysmon"
+		if v := data["Image"]; v != "" {
+			idx := strings.LastIndex(v, "\\")
+			if idx >= 0 {
+				ev.ProcessName = v[idx+1:]
+			} else {
+				ev.ProcessName = v
+			}
+		}
+		ev.Severity = schema.SeverityInfo
+
+	// EventID 6 - Driver loaded
+	case 6:
+		ev.EventType = schema.EventTypeProcess
+		ev.Source = "Sysmon"
+		ev.ImagePath = data["ImageLoaded"]
+		ev.Severity = schema.SeverityMedium
+
+	// EventID 7 - Image (DLL) loaded
+	case 7:
+		ev.EventType = schema.EventTypeProcess
+		ev.Source = "Sysmon"
+		if v := data["Image"]; v != "" {
+			idx := strings.LastIndex(v, "\\")
+			if idx >= 0 {
+				ev.ProcessName = v[idx+1:]
+			} else {
+				ev.ProcessName = v
+			}
+		}
+		ev.ImagePath = data["ImageLoaded"]
+		ev.Severity = schema.SeverityInfo
+
+	// EventID 8 - CreateRemoteThread (injection)
+	case 8:
+		ev.EventType = schema.EventTypeProcess
+		ev.Source = "Sysmon"
+		ev.Severity = schema.SeverityCritical
+		if v := data["SourceImage"]; v != "" {
+			idx := strings.LastIndex(v, "\\")
+			if idx >= 0 {
+				ev.ProcessName = v[idx+1:]
+			} else {
+				ev.ProcessName = v
+			}
+		}
+
+	// EventID 10 - Process access (injection attempt)
+	case 10:
+		ev.EventType = schema.EventTypeProcess
+		ev.Source = "Sysmon"
+		ev.Severity = schema.SeverityHigh
+		if v := data["SourceImage"]; v != "" {
+			idx := strings.LastIndex(v, "\\")
+			if idx >= 0 {
+				ev.ProcessName = v[idx+1:]
+			} else {
+				ev.ProcessName = v
+			}
+		}
+
+	// EventID 11 - File created
+	case 11:
+		ev.EventType = schema.EventTypeFile
+		ev.Source = "Sysmon"
+		ev.FilePath = data["TargetFilename"]
+		if v := data["Image"]; v != "" {
+			idx := strings.LastIndex(v, "\\")
+			if idx >= 0 {
+				ev.ProcessName = v[idx+1:]
+			} else {
+				ev.ProcessName = v
+			}
+		}
+		ev.Severity = schema.SeverityLow
+
+	// EventID 12 - Registry object create/delete
+	case 12:
+		ev.EventType = schema.EventTypeRegistry
+		ev.Source = "Sysmon"
+		ev.RegKey = data["TargetObject"]
+		ev.Severity = schema.SeverityLow
+
+	// EventID 13 - Registry value set
+	case 13:
+		ev.EventType = schema.EventTypeRegistry
+		ev.Source = "Sysmon"
+		ev.RegKey = data["TargetObject"]
+		ev.RegData = data["Details"]
+		ev.Severity = schema.SeverityLow
+		// Persistence via run keys
+		keyLower := strings.ToLower(ev.RegKey)
+		if containsAnyStr(keyLower, `\run\`, `\runonce\`, `\services\`, "userinit", "shell") {
+			ev.Severity = schema.SeverityHigh
+		}
+
+	// EventID 14 - Registry key/value renamed
+	case 14:
+		ev.EventType = schema.EventTypeRegistry
+		ev.Source = "Sysmon"
+		ev.RegKey = data["TargetObject"]
+		ev.Severity = schema.SeverityMedium
+
+	// EventID 15 - File stream created (ADS)
+	case 15:
+		ev.EventType = schema.EventTypeFile
+		ev.Source = "Sysmon"
+		ev.FilePath = data["TargetFilename"]
+		ev.Severity = schema.SeverityHigh
+
+	// EventID 17/18 - Named pipe
+	case 17, 18:
+		ev.EventType = schema.EventTypeNetwork
+		ev.Source = "Sysmon"
+		ev.Severity = schema.SeverityLow
+
+	// EventID 22 - DNS query
+	case 22:
+		ev.EventType = schema.EventTypeDNS
+		ev.Source = "Sysmon"
+		ev.DstIP = data["QueryName"]
+		if v := data["Image"]; v != "" {
+			idx := strings.LastIndex(v, "\\")
+			if idx >= 0 {
+				ev.ProcessName = v[idx+1:]
+			} else {
+				ev.ProcessName = v
+			}
+		}
+		ev.Severity = schema.SeverityInfo
+
+	// EventID 23 - File deleted
+	case 23:
+		ev.EventType = schema.EventTypeFile
+		ev.Source = "Sysmon"
+		ev.FilePath = data["TargetFilename"]
+		ev.Severity = schema.SeverityMedium
+
+	// EventID 25 - Process tampering
+	case 25:
+		ev.EventType = schema.EventTypeProcess
+		ev.Source = "Sysmon"
+		ev.Severity = schema.SeverityCritical
+
+		// PowerShell - Module logging (4103) and Script Block logging (4104)
 	case 4103:
 		ev.EventType = schema.EventTypeProcess
 		ev.Severity = schema.SeverityLow
@@ -372,7 +586,7 @@ func classifyAndEnrichEvent(ev *schema.Event, data map[string]string) {
 		ev.EventType = schema.EventTypeProcess
 		ev.Severity = schema.SeverityLow
 		ev.ProcessName = "powershell"
-		// 4104 = Script Block Logging — captures the ACTUAL script text
+		// 4104 = Script Block Logging - captures the ACTUAL script text
 		if v := firstOf(data, "ScriptBlockText", "Payload"); v != "" {
 			ev.CommandLine = v
 		}
