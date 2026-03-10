@@ -107,7 +107,7 @@ forwarder:
   # Paste the key below before running the install command:
   #   .\obsidianwatch-win-agent-V1.0.exe -config agent.yaml install
   # Without this key the agent service cannot be uninstalled.
-  install_key: "12121212"
+  install_key: "12345678"
 
 queue:
   db_path: "C:\\ProgramData\\ObsidianWatch\\queue"
